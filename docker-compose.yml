@@ -16,6 +16,7 @@ services:
       - TZ=America/New_York
     volumes:
       - freepbx-data:/data
+      - ./configs/dongle.conf:/etc/asterisk/dongle.conf:ro
     devices:
       - /dev/ttyUSB0:/dev/ttyUSB0
       - /dev/ttyUSB1:/dev/ttyUSB1

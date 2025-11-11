@@ -52,8 +52,9 @@ RUN wget https://downloads.asterisk.org/pub/telephony/asterisk/asterisk-23-curre
     make install && \
     ldconfig
 
-# Create asterisk user
+# Create asterisk user and ensure directories exist
 RUN useradd -r -s /bin/false asterisk && \
+    mkdir -p /var/lib/asterisk /var/spool/asterisk /var/log/asterisk /var/run/asterisk && \
     chown -R asterisk:asterisk /var/lib/asterisk && \
     chown -R asterisk:asterisk /var/spool/asterisk && \
     chown -R asterisk:asterisk /var/log/asterisk && \
@@ -67,5 +68,5 @@ RUN rm -rf /usr/src/asterisk-* /usr/src/chan_dongle*
 # Expose ports
 EXPOSE 5060/udp 5060/tcp 5160/udp 5160/tcp 10000-10200/udp
 
-# Start Asterisk
-CMD ["/usr/sbin/asterisk", "-f", "-U", "asterisk", "-G", "asterisk", "-vvvg", "-c"]
+# Start Asterisk (run as root to avoid permission issues, Asterisk will drop privileges)
+CMD ["/usr/sbin/asterisk", "-f", "-vvvg", "-c"]
