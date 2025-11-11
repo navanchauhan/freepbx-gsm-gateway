@@ -1,8 +1,6 @@
 services:
   freepbx:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: ghcr.io/navanchauhan/asterisk23-chan-dongle:latest
     container_name: freepbx-chan-quectel
     hostname: freepbx
     ports:

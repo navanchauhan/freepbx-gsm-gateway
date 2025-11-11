@@ -1,0 +1,71 @@
+FROM debian:bookworm
+
+USER root
+
+# Install dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    wget \
+    libncurses-dev \
+    libssl-dev \
+    libxml2-dev \
+    libsqlite3-dev \
+    uuid-dev \
+    libedit-dev \
+    autoconf \
+    automake \
+    libtool \
+    pkg-config \
+    git \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Download, build, and install Asterisk 23 + chan_dongle
+WORKDIR /usr/src
+RUN wget https://downloads.asterisk.org/pub/telephony/asterisk/asterisk-23-current.tar.gz && \
+    tar -xzf asterisk-23-current.tar.gz && \
+    cd asterisk-23.* && \
+    ./configure --with-jansson-bundled && \
+    make menuselect.makeopts && \
+    make && \
+    echo "DEBUG: Checking for asterisk.h in source tree:" && \
+    ls -la include/asterisk/ | grep -E "^-.*\.h$" | head -30 && \
+    echo "DEBUG: Looking for files with 'asterisk' in name:" && \
+    find include/ -name "*asterisk*.h" && \
+    cd /usr/src && \
+    wget --no-check-certificate -O chan_dongle.tar.gz \
+        https://github.com/navanchauhan/asterisk-chan-dongle/archive/refs/heads/main.tar.gz && \
+    tar -xzf chan_dongle.tar.gz && \
+    mv asterisk-chan-dongle-main chan_dongle && \
+    cd /usr/src/asterisk-23.* && \
+    AST_VERSION=$(./configure --version | grep 'asterisk configure' | awk '{print $3}') && \
+    AST_SRC=$(pwd) && \
+    cd /usr/src/chan_dongle && \
+    ./bootstrap && \
+    ./configure --with-astversion=$AST_VERSION --with-asterisk=$AST_SRC/include DESTDIR=/usr/lib/asterisk/modules && \
+    make && \
+    cd /usr/src/asterisk-23.* && \
+    make install && \
+    make samples && \
+    make config && \
+    cd /usr/src/chan_dongle && \
+    make install && \
+    ldconfig
+
+# Create asterisk user
+RUN useradd -r -s /bin/false asterisk && \
+    chown -R asterisk:asterisk /var/lib/asterisk && \
+    chown -R asterisk:asterisk /var/spool/asterisk && \
+    chown -R asterisk:asterisk /var/log/asterisk && \
+    chown -R asterisk:asterisk /var/run/asterisk && \
+    chown -R asterisk:asterisk /etc/asterisk
+
+# Cleanup
+WORKDIR /
+RUN rm -rf /usr/src/asterisk-* /usr/src/chan_dongle*
+
+# Expose ports
+EXPOSE 5060/udp 5060/tcp 5160/udp 5160/tcp 10000-10200/udp
+
+# Start Asterisk
+CMD ["/usr/sbin/asterisk", "-f", "-U", "asterisk", "-G", "asterisk", "-vvvg", "-c"]
