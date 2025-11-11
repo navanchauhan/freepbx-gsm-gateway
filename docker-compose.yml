@@ -1,0 +1,41 @@
+services:
+  freepbx:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: freepbx-chan-quectel
+    hostname: freepbx
+    ports:
+      - "8081:80"       # Web UI
+      - "5060:5060/udp" # PJSIP UDP
+      - "5060:5060/tcp" # PJSIP TCP
+      - "5061:5061/udp" # SIP TLS
+      - "5160:5160/udp" # Chan_SIP UDP
+      - "5160:5160/tcp" # Chan_SIP TCP
+      - "10000-10200:10000-10200/udp" # RTP
+    environment:
+      - LANG=en_US.UTF-8
+      - TZ=America/New_York
+    volumes:
+      - freepbx-data:/data
+    devices:
+      - /dev/ttyUSB0:/dev/ttyUSB0
+      - /dev/ttyUSB1:/dev/ttyUSB1
+      - /dev/ttyUSB2:/dev/ttyUSB2
+      - /dev/ttyUSB3:/dev/ttyUSB3
+      - /dev/ttyUSB4:/dev/ttyUSB4
+    privileged: false
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    restart: unless-stopped
+    networks:
+      - freepbx-network
+
+networks:
+  freepbx-network:
+    driver: bridge
+
+volumes:
+  freepbx-data:
+    driver: local

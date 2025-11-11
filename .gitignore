@@ -1,0 +1,28 @@
+# Backup files
+*.tar.gz
+*.backup
+freepbx-backup/
+
+# Logs
+*.log
+logs/
+
+# Sensitive data
+*.env
+credentials.txt
+passwords.txt
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Docker volume data (managed by Docker)
+# Don't commit volume data
+volumes/
