@@ -2,7 +2,8 @@ FROM andrius/asterisk:23
 
 USER root
 
-# Install Asterisk dev headers and build dependencies for chan_dongle
+# Install build dependencies for chan_dongle
+# Note: Headers are already in /usr/include from base image
 RUN apt-get update && apt-get install -y \
     build-essential \
     autoconf \
@@ -11,7 +12,6 @@ RUN apt-get update && apt-get install -y \
     pkg-config \
     wget \
     libsqlite3-dev \
-    asterisk-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Download and compile chan_dongle from navanchauhan fork (Asterisk 18-23 compatible)
@@ -24,7 +24,7 @@ RUN wget --no-check-certificate -O chan_dongle.tar.gz \
 # Build chan_dongle for Asterisk 23
 WORKDIR /usr/src/chan_dongle
 RUN ./bootstrap && \
-    ./configure --with-astversion=23.0.0 && \
+    ./configure --with-astversion=23.0.0 --with-asterisk=/usr && \
     make && \
     make install
 
