@@ -22,10 +22,7 @@ services:
       - /dev/ttyUSB2:/dev/ttyUSB2
       - /dev/ttyUSB3:/dev/ttyUSB3
       - /dev/ttyUSB4:/dev/ttyUSB4
-    privileged: false
-    cap_add:
-      - NET_ADMIN
-      - NET_RAW
+    privileged: true
     restart: unless-stopped
     networks:
       - freepbx-network
