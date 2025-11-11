@@ -1,0 +1,1 @@
+Note: chan_dongle code is at https://github.com/navanchauhan/asterisk-chan-dongle
