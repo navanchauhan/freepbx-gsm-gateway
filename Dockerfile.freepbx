@@ -1,0 +1,77 @@
+FROM tiredofit/freepbx:latest
+
+USER root
+
+# Build and install Asterisk channel drivers:
+# - chan_dongle (classic GSM modem driver)
+# - chan_quectel (recommended for SIM7600 voice-over-USB/UAC; still works for SMS/USSD)
+#
+# Note: the upstream base image currently uses Debian 10 (buster), which is EOL.
+# We temporarily repoint APT to archive.debian.org so we can install autotools/deps.
+RUN set -eux; \
+  rm -f /etc/apt/sources.list.d/*.list || true; \
+  printf '%s\n' \
+    'deb http://archive.debian.org/debian buster main contrib non-free' \
+    'deb http://archive.debian.org/debian buster-updates main contrib non-free' \
+    'deb http://archive.debian.org/debian-security buster/updates main contrib non-free' \
+    > /etc/apt/sources.list; \
+  printf '%s\n' \
+    'Acquire::Check-Valid-Until "false";' \
+    'Acquire::AllowInsecureRepositories "true";' \
+    > /etc/apt/apt.conf.d/99-archive-no-check-valid; \
+  apt-get -o Acquire::Check-Valid-Until=false -o Acquire::AllowInsecureRepositories=true update; \
+  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --allow-unauthenticated \
+    autoconf \
+    automake \
+    libtool \
+    libusb-1.0-0-dev \
+    uuid-dev \
+    libsqlite3-dev \
+    libjansson-dev \
+    libasound2-dev \
+    ca-certificates \
+    ; \
+  rm -rf /var/lib/apt/lists/*; \
+  \
+  # Build chan_dongle against the bundled Asterisk headers
+  cd /usr/src; \
+  rm -rf asterisk-chan-dongle; \
+  git clone --depth 1 https://github.com/wdoekes/asterisk-chan-dongle.git; \
+  cd asterisk-chan-dongle; \
+  ./bootstrap; \
+  ./configure --with-astversion=17.9.3 --with-asterisk=/usr/include; \
+  make -j"$(nproc)"; \
+  make install; \
+  \
+  # Build chan_quectel (SIM7600-friendly)
+  cd /usr/src; \
+  rm -rf asterisk-chan-quectel; \
+  git clone --depth 1 https://github.com/IchthysMaranatha/asterisk-chan-quectel.git; \
+  cd asterisk-chan-quectel; \
+  ./bootstrap; \
+  ./configure --with-astversion=17.9.3 --with-asterisk=/usr/include; \
+  make -j"$(nproc)"; \
+  make install; \
+  \
+  # Make sure modules are readable/executable
+  chmod 755 /usr/lib/asterisk/modules/chan_dongle.so /usr/lib/asterisk/modules/chan_quectel.so
+
+# Ensure the 'asterisk' user can access the dongle device nodes.
+# The base image starts Asterisk with -U asterisk -G asterisk.
+RUN cat > /etc/cont-init.d/06-device-perms <<'EOS'
+#!/usr/bin/with-contenv bash
+set -e
+
+# USB serial devices (SIM7600 typically exposes /dev/ttyUSB*)
+for dev in /dev/ttyUSB* /dev/ttyACM*; do
+  [ -e "$dev" ] || continue
+  chmod 666 "$dev" || true
+done
+
+# USB Audio Class (if present)
+if [ -d /dev/snd ]; then
+  chmod -R a+rw /dev/snd || true
+fi
+EOS
+
+RUN chmod +x /etc/cont-init.d/06-device-perms

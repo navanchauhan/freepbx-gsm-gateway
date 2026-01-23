@@ -1,277 +1,216 @@
-# FreePBX GSM Gateway with SIM7600G-H on Unraid
+# FreePBX + SIM7600 GSM Gateway
 
-Complete setup for running FreePBX with chan_dongle to use a SIM7600G-H USB GSM modem for SMS and voice calls.
+Docker-based setup for running FreePBX/Asterisk with GSM/LTE modem support via chan_dongle and chan_quectel.
 
-## Hardware Requirements
+## Setups
 
-- Unraid server
-- Waveshare SIM7600G-H USB dongle (or compatible Quectel/Simcom modem)
-- Active SIM card (tested with Tello)
+This repo contains two Docker setups:
 
-## System Information
+| Setup | Base Image | Asterisk | Use Case |
+|-------|-----------|----------|----------|
+| **FreePBX** (production) | tiredofit/freepbx | 17.9.3 | Full FreePBX with web UI |
+| **Asterisk 23** (dev/CI) | andrius/asterisk:23 | 23.x | Standalone Asterisk for testing |
 
-- **Unraid Server IP**: YOUR_UNRAID_IP (Tailscale)
-- **FreePBX Web UI**: http://YOUR_UNRAID_IP:8081/admin
-- **Phone Number**: +1 (720) 345-4122
-- **Provider**: Tello
-- **Modem Model**: SIMCOM SIM7600
-- **Firmware**: LE20B04SIM
+## Quick Start (FreePBX)
 
-## Quick Start
-
-### 1. Clone and Deploy
+### 1. Clone and Configure
 
 ```bash
-cd /mnt/cache/exp/
-git clone <this-repo> call-me-maybe
-cd call-me-maybe
+git clone https://github.com/navanchauhan/freepbx-gsm-gateway.git
+cd freepbx-gsm-gateway
+cp .env.example .env
+# Edit .env with your settings
 ```
 
 ### 2. Verify USB Modem
 
 ```bash
 lsusb | grep -i 'quectel\|simcom'
-# Should show: Bus 002 Device XXX: ID 1e0e:9011 Qualcomm / Option SimTech, Incorporated
+# Should show: ID 1e0e:9011 Qualcomm / Option SimTech
 
 ls -la /dev/ttyUSB*
 # Should show: /dev/ttyUSB0 through /dev/ttyUSB4
 ```
 
-### 3. Deploy Stack
+### 3. Deploy
 
 ```bash
-docker compose up -d --build
+docker compose -f docker-compose.freepbx.yml up -d --build
 ```
 
-Initial setup takes 20-30 minutes for FreePBX installation.
+Initial setup takes 15-20 minutes for FreePBX installation.
 
 ### 4. Access FreePBX
 
-Navigate to: http://YOUR_UNRAID_IP:8081/admin
+- **Web UI**: `http://<host-ip>:${HTTP_PORT}/admin` (default: 8080)
+- **HTTPS**: `https://<host-ip>:${HTTPS_PORT}/admin` (default: 8443)
 
-**First login**: Create admin account (username: root, password: your-password)
-
-### 5. Fix Permissions and Load Module
-
-```bash
-# Fix TTY permissions
-docker exec freepbx-chan-quectel chmod 666 /dev/ttyUSB*
-
-# Load chan_dongle module
-docker exec freepbx-chan-quectel asterisk -rx 'module load chan_dongle.so'
-
-# Restart dongle to connect
-docker exec freepbx-chan-quectel asterisk -rx 'dongle restart now dongle0'
-```
-
-### 6. Verify Operation
+### 5. Validate Modem
 
 ```bash
-docker exec freepbx-chan-quectel asterisk -rx 'dongle show devices'
+docker exec -it freepbx-sim7600 asterisk -rx "module show like chan_dongle"
+docker exec -it freepbx-sim7600 asterisk -rx "dongle show devices"
+docker exec -it freepbx-sim7600 asterisk -rx "dongle show device state dongle0"
 ```
 
-Should show:
+To restart the modem channel:
+```bash
+docker exec -it freepbx-sim7600 asterisk -rx "dongle start dongle0"
 ```
-ID           Group State      RSSI Mode Submode Provider Name  Model      Firmware          IMEI             IMSI             Number
-dongle0      1     Free       31   0    0       Tello          SIMCOM_SIM +CGMR: LE20B04SIM YOUR_IMEI YOUR_SIM_ID  YOUR_PHONE_NUMBER
+
+## Configuration
+
+### Environment Variables (.env)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| TZ | UTC | Timezone |
+| HTTP_PORT | 8080 | FreePBX HTTP port |
+| HTTPS_PORT | 8443 | FreePBX HTTPS port |
+| SIP_PORT_UDP | 5060 | SIP signaling (UDP) |
+| SIP_PORT_TCP | 5060 | SIP signaling (TCP) |
+| PJSIP_PORT_UDP | 5160 | PJSIP signaling |
+| RTP_PORT_START | 18000 | RTP media range start |
+| RTP_PORT_END | 20000 | RTP media range end |
+| ADMIN_EMAIL | admin@example.com | FreePBX admin email |
+| ADMIN_PASSWORD | change-me | FreePBX admin password |
+
+### Asterisk Config Files
+
+Located in `asterisk/`:
+
+| File | Purpose |
+|------|---------|
+| `dongle.conf` | chan_dongle device config |
+| `quectel.conf` | chan_quectel device config |
+| `extensions_custom.conf` | Custom dialplan |
+| `modules_custom.conf` | Force-load modules |
+
+### SIM7600 Port Mapping
+
+| Port | Function |
+|------|----------|
+| ttyUSB0 | Diagnostic |
+| ttyUSB1 | Audio |
+| ttyUSB2 | AT Commands (Data) |
+| ttyUSB3 | Modem |
+| ttyUSB4 | Reserved |
+
+Default config: `audio=/dev/ttyUSB1`, `data=/dev/ttyUSB2`
+
+## FreePBX Trunk Setup
+
+Create a **Custom Trunk** in FreePBX:
+
+**chan_dongle:**
 ```
+Dongle/dongle0/${OUTNUM}$
+```
+
+**chan_quectel:**
+```
+Quectel/quectel0/${OUTNUM}$
+```
+
+Then create an outbound route using that trunk.
 
 ## Usage
 
 ### Send SMS
 
 ```bash
-docker exec freepbx-chan-quectel asterisk -rx 'dongle sms dongle0 +1XXXXXXXXXX "Your message here"'
+docker exec freepbx-sim7600 asterisk -rx 'dongle sms dongle0 +1XXXXXXXXXX "Your message"'
 ```
 
-### View SMS Log
+### Check Signal/Status
 
 ```bash
-docker exec freepbx-chan-quectel cat /var/log/asterisk/sms.log
+docker exec freepbx-sim7600 asterisk -rx 'dongle show devices'
 ```
 
-### Check Dongle Status
+### View Logs
 
 ```bash
-docker exec freepbx-chan-quectel asterisk -rx 'dongle show devices'
+docker exec freepbx-sim7600 tail -f /var/log/asterisk/full
 ```
-
-### Restart Dongle
-
-```bash
-docker exec freepbx-chan-quectel asterisk -rx 'dongle restart now dongle0'
-```
-
-### View Asterisk Logs
-
-```bash
-docker exec freepbx-chan-quectel tail -f /var/log/asterisk/full
-```
-
-## Configuration Files
-
-### Core Files
-
-- `docker-compose.yml` - Docker Compose configuration
-- `Dockerfile` - Container build instructions
-- `configs/dongle.conf` - Chan_dongle configuration
-- `configs/extensions_custom.conf` - Asterisk dialplan for SMS
-
-### Device Mapping
-
-The SIM7600G-H creates 5 TTY devices:
-- `/dev/ttyUSB0` - Control
-- `/dev/ttyUSB1` - Reserved
-- `/dev/ttyUSB2` - **AT Commands (Data port)**
-- `/dev/ttyUSB3` - **Audio port**
-- `/dev/ttyUSB4` - Reserved
 
 ## Troubleshooting
 
 ### Module Won't Load
 
 ```bash
-# Check for errors
-docker exec freepbx-chan-quectel tail -50 /var/log/asterisk/full | grep -i dongle
-
-# Reload module
-docker exec freepbx-chan-quectel asterisk -rx 'module unload chan_dongle.so'
-docker exec freepbx-chan-quectel asterisk -rx 'module load chan_dongle.so'
+docker exec freepbx-sim7600 asterisk -rx 'module load chan_dongle.so'
+docker exec freepbx-sim7600 asterisk -rx 'dongle restart now dongle0'
 ```
 
 ### Permission Denied on TTY
 
+The container includes a startup script that sets permissions, but if needed:
 ```bash
-docker exec freepbx-chan-quectel chmod 666 /dev/ttyUSB*
-docker exec freepbx-chan-quectel asterisk -rx 'dongle restart now dongle0'
+docker exec freepbx-sim7600 chmod 666 /dev/ttyUSB*
 ```
 
-### Dongle Not Connecting
+### Dongle Shows "Not Connected"
 
-```bash
-# Test AT commands directly
-docker exec freepbx-chan-quectel bash -c 'echo AT | timeout 2 cat > /dev/ttyUSB2 && timeout 2 cat < /dev/ttyUSB2'
-# Should return: AT OK
-
-# Check signal strength
-docker exec freepbx-chan-quectel asterisk -rx 'dongle show devices'
+Try swapping audio/data ports in `asterisk/dongle.conf`:
+```ini
+audio=/dev/ttyUSB3
+data=/dev/ttyUSB2
 ```
 
 ### Container Won't Start
 
+Check logs:
 ```bash
-# Check logs
-docker logs freepbx-chan-quectel
-
-# Check port conflicts
-netstat -tuln | grep 8081
-
-# Restart container
-docker compose restart
+docker logs freepbx-sim7600
 ```
 
-### SMS Not Received
+## Development Setup (Asterisk 23)
 
-SMS messages are automatically logged to `/var/log/asterisk/sms.log` and deleted from the modem.
-
-To view received messages:
-```bash
-docker exec freepbx-chan-quectel tail -20 /var/log/asterisk/sms.log
-```
-
-## Architecture
-
-### Container Components
-
-1. **FreePBX 15.0.16.56** - Web-based PBX management
-2. **Asterisk 17.9.3** - VoIP/telephony engine
-3. **chan_dongle** - GSM modem channel driver (compiled from wdoekes fork)
-4. **MariaDB** - Embedded database
-5. **Apache** - Web server
-
-### Network Ports
-
-- `8081` - FreePBX Web UI (HTTP)
-- `5060` - SIP (TCP/UDP)
-- `5061` - SIP TLS
-- `10000-10200` - RTP (voice media)
-
-## Advanced Configuration
-
-### Setting Up Outbound Calling
-
-1. Log into FreePBX web UI
-2. Navigate to **Connectivity → Trunks**
-3. Add Custom Trunk with dial string: `Dongle/dongle0/$OUTNUM$`
-
-### Setting Up Inbound Routes
-
-1. Navigate to **Connectivity → Inbound Routes**
-2. Add route for DID: `YOUR_PHONE_NUMBER`
-3. Route to extension or IVR
-
-### Automated SMS Responses
-
-Edit `configs/extensions_custom.conf` to add custom SMS handling logic.
-
-## Backup
-
-### Essential Files to Backup
+For development/testing with standalone Asterisk 23:
 
 ```bash
-# Configuration
-/mnt/cache/exp/call-me-maybe/docker-compose.yml
-/mnt/cache/exp/call-me-maybe/Dockerfile
-/mnt/cache/exp/call-me-maybe/configs/
-
-# FreePBX Data (in Docker volume)
-docker run --rm -v call-me-maybe_freepbx-data:/data -v $(pwd):/backup ubuntu tar czf /backup/freepbx-backup.tar.gz /data
+docker compose up -d --build
 ```
 
-### Restore
+Uses `Dockerfile` with `andrius/asterisk:23` base and chan_dongle compiled from the [navanchauhan fork](https://github.com/navanchauhan/asterisk-chan-dongle) (Asterisk 18-23 compatible).
 
-```bash
-# Extract backup
-docker run --rm -v call-me-maybe_freepbx-data:/data -v $(pwd):/backup ubuntu bash -c "cd /data && tar xzf /backup/freepbx-backup.tar.gz --strip 1"
+## Channel Drivers
+
+| Driver | Best For | Notes |
+|--------|----------|-------|
+| chan_dongle | Classic GSM modems | Confirmed working with SIM7600 |
+| chan_quectel | LTE modems with UAC | Better USB Audio Class support |
+
+Both are built and available in the FreePBX image. Enable in `asterisk/modules_custom.conf`.
+
+## Files
+
+```
+.
+├── Dockerfile              # Asterisk 23 standalone
+├── Dockerfile.ast23        # Asterisk 23 CI build
+├── Dockerfile.freepbx      # FreePBX production
+├── docker-compose.yml      # Asterisk 23 compose
+├── docker-compose.freepbx.yml  # FreePBX compose
+├── .env.example            # Environment template
+├── asterisk/               # Asterisk configs
+│   ├── dongle.conf
+│   ├── quectel.conf
+│   ├── extensions_custom.conf
+│   └── modules_custom.conf
+├── configs/                # Legacy config location
+└── data/                   # FreePBX persistent data
 ```
 
-## Build Notes
+## Hardware
 
-### Chan_dongle Compilation
-
-The chan_dongle module is compiled from source during container build:
-- Fork: wdoekes/asterisk-chan-dongle
-- Asterisk Version: 17.9.3
-- Required libraries: libsqlite3-dev, autoconf, automake, libtool
-
-### Permissions Fix
-
-TTY devices must be readable/writable by the `asterisk` user inside the container:
-```bash
-chmod 666 /dev/ttyUSB*
-```
-
-## Known Issues
-
-1. **Auto-delete SMS**: Messages are automatically deleted after receipt. This is by design (`autodeletesms=yes`).
-2. **TTY Permissions**: Need to be fixed after container restart or host reboot.
-3. **First Boot**: FreePBX takes 20-30 minutes to initialize on first run.
-
-## Resources
-
-- [Chan_dongle Fork (Asterisk 18-23)](https://github.com/navanchauhan/asterisk-chan-dongle)
-- [Chan_dongle Upstream](https://github.com/wdoekes/asterisk-chan-dongle)
-- [FreePBX Documentation](https://wiki.freepbx.org/)
-- [Asterisk Documentation](https://wiki.asterisk.org/)
-- [SIM7600 AT Commands](https://www.waveshare.com/wiki/SIM7600G-H)
-
-## License
-
-This configuration is provided as-is for personal/educational use.
+- **Modem**: Waveshare SIM7600G-H (or compatible Quectel/Simcom)
+- **SIM**: Any active SIM card (tested with Tello/T-Mobile)
 
 ## Credits
 
-- FreePBX: [tiredofit/freepbx](https://github.com/tiredofit/docker-freepbx) Docker image
-- chan_dongle: [navanchauhan/asterisk-chan-dongle](https://github.com/navanchauhan/asterisk-chan-dongle) (Asterisk 18-23 compatible fork)
-- Original chan_dongle: bg111, maintained by wdoekes
-- Hardware: Waveshare SIM7600G-H
+- FreePBX Docker: [tiredofit/freepbx](https://github.com/tiredofit/docker-freepbx)
+- chan_dongle: [wdoekes/asterisk-chan-dongle](https://github.com/wdoekes/asterisk-chan-dongle)
+- chan_dongle (Ast 18-23): [navanchauhan/asterisk-chan-dongle](https://github.com/navanchauhan/asterisk-chan-dongle)
+- chan_quectel: [IchthysMaranatha/asterisk-chan-quectel](https://github.com/IchthysMaranatha/asterisk-chan-quectel)

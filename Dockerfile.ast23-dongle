@@ -1,0 +1,70 @@
+# Asterisk 23 with chan_dongle and chan_quectel
+FROM andrius/asterisk:23
+
+USER root
+
+# Install build dependencies for Asterisk and chan_dongle
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    autoconf \
+    automake \
+    build-essential \
+    libtool \
+    libusb-1.0-0-dev \
+    uuid-dev \
+    libsqlite3-dev \
+    libjansson-dev \
+    libasound2-dev \
+    libedit-dev \
+    libxml2-dev \
+    libncurses-dev \
+    libssl-dev \
+    git \
+    ca-certificates \
+    wget \
+    && rm -rf /var/lib/apt/lists/*
+
+# Download Asterisk 23 source for headers and generate build headers
+WORKDIR /usr/src
+RUN wget -q https://downloads.asterisk.org/pub/telephony/asterisk/asterisk-23-current.tar.gz && \
+    tar -xzf asterisk-23-current.tar.gz && \
+    rm asterisk-23-current.tar.gz && \
+    cd asterisk-23.* && \
+    ./configure --with-jansson-bundled && \
+    make menuselect.makeopts && \
+    AST_SRC=$(pwd) && \
+    echo "AST_SRC=$AST_SRC" > /tmp/ast_src_path
+
+# Build chan_dongle from navanchauhan fork (Asterisk 18-23 compatible)
+RUN . /tmp/ast_src_path && \
+    cd /usr/src && \
+    git clone --depth 1 https://github.com/navanchauhan/asterisk-chan-dongle.git && \
+    cd asterisk-chan-dongle && \
+    ./bootstrap && \
+    ./configure --with-astversion=23.0.0 --with-asterisk=$AST_SRC/include && \
+    make -j"$(nproc)" && \
+    make install && \
+    chmod 755 /usr/lib/asterisk/modules/chan_dongle.so
+
+# Build chan_quectel (better for SIM7600 with USB Audio Class)
+RUN . /tmp/ast_src_path && \
+    cd /usr/src && \
+    git clone --depth 1 https://github.com/IchthysMaranatha/asterisk-chan-quectel.git && \
+    cd asterisk-chan-quectel && \
+    ./bootstrap && \
+    ./configure --with-astversion=23.0.0 --with-asterisk=$AST_SRC/include && \
+    make -j"$(nproc)" && \
+    make install && \
+    chmod 755 /usr/lib/asterisk/modules/chan_quectel.so || echo "chan_quectel build failed, continuing without it"
+
+# Cleanup build artifacts and source
+RUN rm -rf /usr/src/asterisk-* /tmp/ast_src_path && \
+    apt-get purge -y build-essential autoconf automake libtool git wget && \
+    apt-get autoremove -y && \
+    apt-get clean
+
+# Create necessary directories
+RUN mkdir -p /var/lib/asterisk/smsdb /var/log/asterisk /var/run/asterisk && \
+    chmod 755 /var/lib/asterisk/smsdb /var/log/asterisk /var/run/asterisk
+
+# Expose Asterisk ports
+EXPOSE 5060/udp 5060/tcp 5160/udp 5160/tcp 10000-20000/udp
