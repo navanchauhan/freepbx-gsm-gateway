@@ -15,6 +15,7 @@ services:
       - "5060:5060/udp"
       - "5060:5060/tcp"
       - "5160:5160/udp"
+      - "5038:5038/tcp"    # AMI
       - "10000-10200:10000-10200/udp"
 
     volumes:
@@ -22,6 +23,8 @@ services:
       - ./asterisk/dongle.conf:/etc/asterisk/dongle.conf
       - ./asterisk/quectel.conf:/etc/asterisk/quectel.conf
       - ./asterisk/extensions_custom.conf:/etc/asterisk/extensions_custom.conf
+      - ./asterisk/pjsip_custom.conf:/etc/asterisk/pjsip_custom.conf
+      - ./asterisk/manager_custom.conf:/etc/asterisk/manager_custom.conf
       - ./asterisk/modules.conf:/etc/asterisk/modules.conf
 
       # USB access
