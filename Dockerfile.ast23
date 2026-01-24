@@ -1,72 +1,73 @@
-FROM debian:bookworm
+# Asterisk 23 + chan_quectel (SIM7600) with CLCC noise patch
+FROM andrius/asterisk:23
 
 USER root
 
-# Install dependencies
-RUN apt-get update && apt-get install -y \
-    build-essential \
-    wget \
-    libncurses-dev \
-    libssl-dev \
-    libxml2-dev \
-    libsqlite3-dev \
-    uuid-dev \
-    libedit-dev \
+# Build deps for chan_quectel
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     autoconf \
     automake \
+    build-essential \
     libtool \
-    pkg-config \
+    libusb-1.0-0-dev \
+    uuid-dev \
+    libsqlite3-dev \
+    libjansson-dev \
+    libasound2-dev \
+    libedit-dev \
+    libxml2-dev \
+    libncurses-dev \
+    libssl-dev \
     git \
-    curl \
+    ca-certificates \
+    wget \
+    perl \
     && rm -rf /var/lib/apt/lists/*
 
-# Download, build, and install Asterisk 23 + chan_dongle
-WORKDIR /usr/src
-RUN wget https://downloads.asterisk.org/pub/telephony/asterisk/asterisk-23-current.tar.gz && \
-    tar -xzf asterisk-23-current.tar.gz && \
-    cd asterisk-23.* && \
-    ./configure --with-jansson-bundled && \
-    make menuselect.makeopts && \
-    make && \
-    echo "DEBUG: Checking for asterisk.h in source tree:" && \
-    ls -la include/asterisk/ | grep -E "^-.*\.h$" | head -30 && \
-    echo "DEBUG: Looking for files with 'asterisk' in name:" && \
-    find include/ -name "*asterisk*.h" && \
-    cd /usr/src && \
-    wget --no-check-certificate -O chan_dongle.tar.gz \
-        https://github.com/navanchauhan/asterisk-chan-dongle/archive/refs/heads/main.tar.gz && \
-    tar -xzf chan_dongle.tar.gz && \
-    mv asterisk-chan-dongle-main chan_dongle && \
-    cd /usr/src/asterisk-23.* && \
-    AST_VERSION=$(./configure --version | grep 'asterisk configure' | awk '{print $3}') && \
-    AST_SRC=$(pwd) && \
-    cd /usr/src/chan_dongle && \
-    ./bootstrap && \
-    ./configure --with-astversion=$AST_VERSION --with-asterisk=$AST_SRC/include DESTDIR=/usr/lib/asterisk/modules && \
-    make && \
-    cd /usr/src/asterisk-23.* && \
-    make install && \
-    make samples && \
-    make config && \
-    cd /usr/src/chan_dongle && \
-    make install && \
-    ldconfig
+ARG ASTERISK_VERSION=23.2.0
+ENV AST_SRC=/usr/src/asterisk-${ASTERISK_VERSION}
 
-# Create asterisk user and ensure directories exist
-RUN useradd -r -s /bin/false asterisk && \
-    mkdir -p /var/lib/asterisk /var/spool/asterisk /var/log/asterisk /var/run/asterisk && \
-    chown -R asterisk:asterisk /var/lib/asterisk && \
-    chown -R asterisk:asterisk /var/spool/asterisk && \
-    chown -R asterisk:asterisk /var/log/asterisk && \
-    chown -R asterisk:asterisk /var/run/asterisk && \
-    chown -R asterisk:asterisk /etc/asterisk
+# Bring in headers from the running Asterisk build
+COPY asterisk/autoconfig.h /tmp/asterisk-autoconfig.h
+COPY asterisk/buildopts.h /tmp/asterisk-buildopts.h
+
+# Pull Asterisk headers and inject autoconfig/buildopts
+RUN cd /usr/src && \
+    wget -q https://downloads.asterisk.org/pub/telephony/asterisk/asterisk-${ASTERISK_VERSION}.tar.gz && \
+    tar -xzf asterisk-${ASTERISK_VERSION}.tar.gz && \
+    rm asterisk-${ASTERISK_VERSION}.tar.gz && \
+    cp /tmp/asterisk-autoconfig.h $AST_SRC/include/asterisk/autoconfig.h && \
+    cp /tmp/asterisk-buildopts.h $AST_SRC/include/asterisk/buildopts.h
+
+# Build chan_quectel (patched for SIM7600 CLCC noise + gcc14 signature fix)
+RUN cd /usr/src && \
+    git clone --depth 1 https://github.com/IchthysMaranatha/asterisk-chan-quectel.git && \
+    cd asterisk-chan-quectel && \
+    perl -0777 -i -pe 's/const struct iovec iov\[2\]/const struct iovec *iov/' at_response.c && \
+    perl -0777 -i -pe 's/(\tchar \*p;\r\n)/$1\tchar *clcc;\r\n/' at_response.c && \
+    perl -0777 -i -pe 's/\t\t\tif\(at_parse_clcc\(str, /\t\t\tclcc = strstr(str, "+CLCC:");\r\n\t\t\tif (!clcc)\r\n\t\t\t{\r\n\t\t\t\t\/\* Skip non-CLCC lines (e.g. SIM7600 "VOICE CALL: BEGIN\/END") \*\/\r\n\t\t\t}\r\n\t\t\telse if(at_parse_clcc(clcc, /' at_response.c && \
+    perl -0777 -i -pe 's/(\[%s\] can\x27t parse CLCC line \x27%s\x27\\n", PVT_ID\(pvt\), )str/\1clcc ? clcc : str/' at_response.c && \
+    grep -q "char \*clcc;" at_response.c && \
+    grep -q "clcc = strstr" at_response.c && \
+    ./bootstrap && \
+    ./configure --with-astversion=${ASTERISK_VERSION} --with-asterisk=$AST_SRC/include && \
+    make -j"$(nproc)" && \
+    make install && \
+    chmod 755 /usr/lib/asterisk/modules/chan_quectel.so
 
 # Cleanup
-WORKDIR /
-RUN rm -rf /usr/src/asterisk-* /usr/src/chan_dongle*
+RUN rm -rf /usr/src/asterisk-${ASTERISK_VERSION} /usr/src/asterisk-chan-quectel && \
+    apt-get purge -y build-essential autoconf automake libtool git wget && \
+    apt-get autoremove -y && \
+    apt-get clean
 
-# Expose ports
-EXPOSE 5060/udp 5060/tcp 5160/udp 5160/tcp 10000-10200/udp
+# Allow Asterisk to open /dev/ttyUSB* (group 16 = dialout on many distros)
+RUN set -e; \
+    if getent group 16 >/dev/null; then GNAME="$(getent group 16 | cut -d: -f1)"; else GNAME=hostdialout; groupadd -g 16 "$GNAME"; fi; \
+    usermod -aG tty,"$GNAME" asterisk
 
-# Start Asterisk (run as root to avoid permission issues, Asterisk will drop privileges)
-CMD ["/usr/sbin/asterisk", "-f", "-vvvg", "-c"]
+# Create necessary directories
+RUN mkdir -p /var/lib/asterisk/smsdb /var/log/asterisk /var/run/asterisk && \
+    chmod 755 /var/lib/asterisk/smsdb /var/log/asterisk /var/run/asterisk
+
+EXPOSE 5060/udp 5060/tcp 5160/udp 5160/tcp 10000-20000/udp

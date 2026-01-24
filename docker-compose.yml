@@ -1,37 +1,44 @@
 services:
-  freepbx:
-    image: ghcr.io/navanchauhan/asterisk23-chan-dongle:latest
-    container_name: freepbx-chan-quectel
-    hostname: freepbx
-    ports:
-      - "8081:80"       # Web UI
-      - "5060:5060/udp" # PJSIP UDP
-      - "5060:5060/tcp" # PJSIP TCP
-      - "5061:5061/udp" # SIP TLS
-      - "5160:5160/udp" # Chan_SIP UDP
-      - "5160:5160/tcp" # Chan_SIP TCP
-      - "10000-10200:10000-10200/udp" # RTP
+  asterisk:
+    build:
+      context: .
+      dockerfile: Dockerfile.ast23
+    container_name: asterisk-sim7600
+    hostname: asterisk-sim7600
+    restart: unless-stopped
+    privileged: true
+
+    group_add:
+      - "16"
+
     environment:
-      - LANG=en_US.UTF-8
-      - TZ=America/New_York
+      - TZ=${TZ:-America/Los_Angeles}
+
+    ports:
+      - "${SIP_PORT_UDP:-5060}:5060/udp"
+      - "${SIP_PORT_TCP:-5060}:5060/tcp"
+      - "${PJSIP_PORT_UDP:-5160}:5160/udp"
+      - "${AMI_PORT:-5038}:5038/tcp"
+      - "${RTP_PORT_START:-10000}-${RTP_PORT_END:-20000}:${RTP_PORT_START:-10000}-${RTP_PORT_END:-20000}/udp"
+
     volumes:
-      - freepbx-data:/data
-      - ./configs/dongle.conf:/etc/asterisk/dongle.conf:ro
+      - ./asterisk/quectel.conf:/etc/asterisk/quectel.conf
+      - ./asterisk/extensions_custom.conf:/etc/asterisk/extensions.conf
+      - ./asterisk/pjsip_custom.conf:/etc/asterisk/pjsip.conf
+      - ./asterisk/modules.conf:/etc/asterisk/modules.conf
+
+      # Recordings and optional custom sounds
+      - ./recordings:/var/spool/asterisk/monitor
+      - ./sounds:/var/lib/asterisk/sounds/custom
+
+      # USB access for modem
+      - /dev/bus/usb:/dev/bus/usb
+      - /dev/serial:/dev/serial
+
     devices:
       - /dev/ttyUSB0:/dev/ttyUSB0
       - /dev/ttyUSB1:/dev/ttyUSB1
       - /dev/ttyUSB2:/dev/ttyUSB2
       - /dev/ttyUSB3:/dev/ttyUSB3
       - /dev/ttyUSB4:/dev/ttyUSB4
-    privileged: true
-    restart: unless-stopped
-    networks:
-      - freepbx-network
-
-networks:
-  freepbx-network:
-    driver: bridge
-
-volumes:
-  freepbx-data:
-    driver: local
+      - /dev/snd:/dev/snd

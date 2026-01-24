@@ -1,16 +1,8 @@
-# Backup files
-*.tar.gz
-*.backup
-freepbx-backup/
-
 # Logs
 *.log
-logs/
 
 # Sensitive data
-*.env
-credentials.txt
-passwords.txt
+.env
 
 # OS files
 .DS_Store
@@ -23,13 +15,8 @@ Thumbs.db
 *.swo
 *~
 
-# Docker volume data (managed by Docker)
-# Don't commit volume data
-volumes/
-
-# FreePBX persistent data (keep directory structure)
-data/*
-!data/.gitkeep
-
-# Secrets
-.admin_password
+# Recordings and custom sounds
+recordings/*
+!recordings/.gitkeep
+sounds/*
+!sounds/.gitkeep
