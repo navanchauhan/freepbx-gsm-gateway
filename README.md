@@ -77,6 +77,41 @@ To convert a WAV to 8k mono:
 ffmpeg -i input.wav -ac 1 -ar 8000 -acodec pcm_s16le custom.wav
 ```
 
+## Dialplan examples (current)
+
+These live in `asterisk/extensions_custom.conf`.
+
+### play-audio
+```asterisk
+[play-audio]
+exten => s,1,Answer()
+ same => n,System(/usr/sbin/asterisk -rx "quectel cmd quectel0 AT+CHFA=0")
+ same => n,System(/usr/sbin/asterisk -rx "quectel cmd quectel0 AT+CMICGAIN=3")
+ same => n,System(/usr/sbin/asterisk -rx "quectel cmd quectel0 AT+COUTGAIN=8")
+ same => n,System(/usr/sbin/asterisk -rx "quectel cmd quectel0 AT+CPCMREG=1")
+ same => n,Set(AUDIO_FILE=${IF($["${AUDIO_FILE}"=""]?hello-world:${AUDIO_FILE})})
+ same => n,Wait(1)
+ same => n,Playback(${AUDIO_FILE})
+ same => n,Wait(1)
+ same => n,System(/usr/sbin/asterisk -rx "quectel cmd quectel0 AT+CPCMREG=0")
+ same => n,Hangup()
+```
+
+### record-call
+```asterisk
+[record-call]
+exten => s,1,Answer()
+ same => n,System(/usr/sbin/asterisk -rx "quectel cmd quectel0 AT+CHFA=0")
+ same => n,System(/usr/sbin/asterisk -rx "quectel cmd quectel0 AT+CMICGAIN=3")
+ same => n,System(/usr/sbin/asterisk -rx "quectel cmd quectel0 AT+COUTGAIN=8")
+ same => n,System(/usr/sbin/asterisk -rx "quectel cmd quectel0 AT+CPCMREG=1")
+ same => n,Set(RECFILE=/var/spool/asterisk/monitor/recording-${STRFTIME(${EPOCH},,%Y%m%d-%H%M%S)}.wav)
+ same => n,MixMonitor(${RECFILE})
+ same => n,Wait(600)
+ same => n,System(/usr/sbin/asterisk -rx "quectel cmd quectel0 AT+CPCMREG=0")
+ same => n,Hangup()
+```
+
 ## SIP endpoint (direct config)
 
 Edit `asterisk/pjsip_custom.conf` (default user `pyclient` / `pyclientpass`), then:
