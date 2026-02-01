@@ -79,12 +79,34 @@ ffmpeg -i input.wav -ac 1 -ar 8000 -acodec pcm_s16le custom.wav
 
 ## SIP endpoint (direct config)
 
-Edit `asterisk/pjsip_custom.conf` (default user `testuser` / `testpass123`), then:
+Edit `asterisk/pjsip_custom.conf` (default user `pyclient` / `pyclientpass`), then:
 ```bash
 docker exec asterisk-sim7600 asterisk -rx "pjsip reload"
 ```
 
-Dial via SIP using the `[from-internal]` rules in `asterisk/extensions_custom.conf`.
+Use the `[from-pjsip]` rules in `asterisk/extensions_custom.conf` (PJSIP listens on UDP `5160`).
+
+## PJSIP + Python control (dial + play + record)
+
+1) Put an **8kHz mono PCM WAV** into `./sounds/` (example `intro.wav`).
+2) Reload PJSIP + dialplan after edits:
+```bash
+docker exec asterisk-sim7600 asterisk -rx "pjsip reload"
+docker exec asterisk-sim7600 asterisk -rx "dialplan reload"
+```
+3) Run the Python script from your machine:
+```bash
+python3 scripts/pjsip_call.py --server <unraid-ip> --number 17208828227 --audio-file custom/intro
+```
+
+Recording saved to:
+```
+./recordings/pjsip-<number>-YYYYMMDD-HHMMSS.wav
+```
+
+Notes:
+- `--audio-file` is optional; default is `hello-world`.
+- The script uses **PJSIP Python bindings** (`pjsua2`). Install/build PJSIP with Python support before running the script.
 
 ## Notes
 
