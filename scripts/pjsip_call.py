@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import gc
 import signal
 import sys
 import time
@@ -17,13 +18,20 @@ except Exception as exc:
 class SipAccount(pj.Account):
     def onRegState(self, prm):
         info = self.getInfo()
-        print(f"Registration: {info.regStatus} {info.regReason}")
+        reason = getattr(info, "regReason", None)
+        if reason is None:
+            reason = getattr(info, "regStatusText", "")
+        print(f"Registration: {info.regStatus} {reason}")
 
 
 class SipCall(pj.Call):
-    def __init__(self, account):
+    def __init__(self, account, play_file="", record_file=""):
         super().__init__(account)
         self.disconnected = False
+        self.play_file = play_file
+        self.record_file = record_file
+        self.player = None
+        self.recorder = None
 
     def onCallState(self, prm):
         info = self.getInfo()
@@ -33,6 +41,28 @@ class SipCall(pj.Call):
         )
         if info.state == pj.PJSIP_INV_STATE_DISCONNECTED:
             self.disconnected = True
+
+    def onCallMediaState(self, prm):
+        info = self.getInfo()
+        for idx, media in enumerate(info.media):
+            if media.type != pj.PJMEDIA_TYPE_AUDIO:
+                continue
+            if media.status != pj.PJSUA_CALL_MEDIA_ACTIVE:
+                continue
+            try:
+                am = self.getAudioMedia(idx)
+            except pj.Error:
+                continue
+
+            if self.play_file and self.player is None:
+                self.player = pj.AudioMediaPlayer()
+                self.player.createPlayer(self.play_file)
+                self.player.startTransmit(am)
+
+            if self.record_file and self.recorder is None:
+                self.recorder = pj.AudioMediaRecorder()
+                self.recorder.createRecorder(self.record_file)
+                am.startTransmit(self.recorder)
 
 
 def build_args():
@@ -48,6 +78,16 @@ def build_args():
         "--audio-file",
         default="",
         help="Optional Asterisk sound name (e.g. custom/intro)",
+    )
+    parser.add_argument(
+        "--play-file",
+        default="",
+        help="Local WAV file to stream over RTP (client-side audio)",
+    )
+    parser.add_argument(
+        "--record-file",
+        default="",
+        help="Local WAV file to record inbound audio",
     )
     parser.add_argument(
         "--timeout",
@@ -71,7 +111,7 @@ def main():
 
     tcfg = pj.TransportConfig()
     tcfg.port = 0
-    ep.transportCreate(pj.PJSIP_TRANSPORT_UDP, tcfg)
+    transport_id = ep.transportCreate(pj.PJSIP_TRANSPORT_UDP, tcfg)
     ep.libStart()
 
     ep.audDevManager().setNullDev()
@@ -79,6 +119,8 @@ def main():
     acc_cfg = pj.AccountConfig()
     acc_cfg.idUri = f"sip:{args.user}@{args.server}"
     acc_cfg.regConfig.registrarUri = f"sip:{args.server}:{args.port}"
+    acc_cfg.regConfig.registerOnAdd = False
+    acc_cfg.sipConfig.transportId = transport_id
     acc_cfg.sipConfig.authCreds.append(
         pj.AuthCredInfo("digest", "*", args.user, 0, args.password)
     )
@@ -86,7 +128,9 @@ def main():
     account = SipAccount()
     account.create(acc_cfg)
 
-    call = SipCall(account)
+    call = SipCall(
+        account, play_file=args.play_file, record_file=args.record_file
+    )
     call_prm = pj.CallOpParam(True)
     call_prm.opt.audioCount = 1
     call_prm.opt.videoCount = 0
@@ -110,13 +154,22 @@ def main():
     signal.signal(signal.SIGINT, handle_sigint)
 
     start = time.time()
-    while not call.disconnected:
-        time.sleep(0.2)
-        if args.timeout and (time.time() - start) > args.timeout:
-            call.hangup(pj.CallOpParam())
-            break
-
-    ep.libDestroy()
+    try:
+        while not call.disconnected:
+            time.sleep(0.2)
+            if args.timeout and (time.time() - start) > args.timeout:
+                call.hangup(pj.CallOpParam())
+                break
+    finally:
+        if call and not call.disconnected:
+            try:
+                call.hangup(pj.CallOpParam())
+            except pj.Error:
+                pass
+        call = None
+        account = None
+        gc.collect()
+        ep.libDestroy()
 
 
 if __name__ == "__main__":
