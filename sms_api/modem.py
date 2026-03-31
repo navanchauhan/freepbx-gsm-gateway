@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 import re
 import threading
 import time
+from typing import Callable
 
 import serial
 
@@ -243,10 +244,17 @@ class AtSerialClient:
 
 
 class ModemPoller(threading.Thread):
-    def __init__(self, *, store, settings) -> None:
+    def __init__(
+        self,
+        *,
+        store,
+        settings,
+        on_message_created: Callable[[dict, dict], None] | None = None,
+    ) -> None:
         super().__init__(name="mms-modem-poller", daemon=True)
         self.store = store
         self.settings = settings
+        self.on_message_created = on_message_created
         self._stop_event = threading.Event()
 
     def stop(self) -> None:
@@ -302,7 +310,7 @@ class ModemPoller(threading.Thread):
                             print(f"[mms-poller] MMS fetch failed for {parsed.transport_key}: {exc}")
                             continue
 
-                    self.store.create_inbound_message(
+                    chat_row, message_row = self.store.create_inbound_message(
                         local_number=local_number,
                         remote_number=remote_number,
                         body=body,
@@ -313,6 +321,8 @@ class ModemPoller(threading.Thread):
                         content_location=parsed.mms_notification.content_location if parsed.mms_notification else None,
                         attachments=attachments or [],
                     )
+                    if self.on_message_created is not None:
+                        self.on_message_created(chat_row, message_row)
                     print(
                         "[mms-poller] captured "
                         f"{parsed.service} from {remote_number} in {message.storage}"

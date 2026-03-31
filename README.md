@@ -138,6 +138,7 @@ It is intentionally SMS-only for now:
 - plain text only
 - outbound messages are queued through Asterisk AMI
 - inbound messages are pushed into the same store from the `[quectel-incoming]` dialplan
+- realtime delivery is available through webhooks, server-sent events, and WebSockets
 
 ### Auth
 
@@ -150,6 +151,8 @@ SMS_API_INTERNAL_TOKEN=replace-me-too
 
 If you change `SMS_API_INTERNAL_TOKEN`, update `SMS_API_INTERNAL_TOKEN` in `asterisk/extensions_custom.conf` to match before reloading the dialplan.
 
+Browser clients can also use `access_token=<SMS_API_BEARER_TOKEN>` on the SSE and WebSocket endpoints when they cannot set an `Authorization` header directly.
+
 ### Endpoints
 
 - `GET /healthz`
@@ -159,6 +162,11 @@ If you change `SMS_API_INTERNAL_TOKEN`, update `SMS_API_INTERNAL_TOKEN` in `aste
 - `GET /v3/chats/{chatId}`
 - `GET /v3/chats/{chatId}/messages`
 - `POST /v3/chats/{chatId}/messages`
+- `GET /v3/webhooks`
+- `POST /v3/webhooks`
+- `DELETE /v3/webhooks/{webhookId}`
+- `GET /v3/events/stream`
+- `GET /v3/events/ws` (WebSocket)
 
 Interactive docs:
 
@@ -207,12 +215,75 @@ curl http://localhost:${SMS_API_PORT:-8080}/v3/chats/<chat-id>/messages \
   }'
 ```
 
+### Example: subscribe a webhook for live message events
+
+Supported event types are:
+
+- `message.inbound`
+- `message.outbound`
+
+If `event_types` is omitted, the subscription receives both.
+
+```bash
+curl http://localhost:${SMS_API_PORT:-8080}/v3/webhooks \
+  -H "Authorization: Bearer ${SMS_API_BEARER_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "target_url": "https://example.com/hooks/sms",
+    "event_types": ["message.inbound"],
+    "secret": "replace-me"
+  }'
+```
+
+Webhook deliveries are `POST`ed as JSON and include:
+
+- `X-SMS-API-Event-Id`
+- `X-SMS-API-Event-Type`
+- `X-SMS-API-Signature-256: sha256=<hex>` when a secret is configured
+
+### Example: stream events over SSE
+
+If `events` is omitted, the stream includes both supported message event types.
+
+```bash
+curl -N "http://localhost:${SMS_API_PORT:-8080}/v3/events/stream?access_token=${SMS_API_BEARER_TOKEN}&events=message.inbound"
+```
+
+SSE payloads use standard event framing:
+
+```text
+id: <event-id>
+event: message.inbound
+data: {"id":"<event-id>","type":"message.inbound","occurred_at":"...","chat":{...},"message":{...}}
+```
+
+### Example: stream events over WebSocket
+
+```bash
+python3 - <<'PY'
+import asyncio
+import json
+import websockets
+
+async def main():
+    uri = "ws://localhost:8080/v3/events/ws?access_token=change-me&events=message.inbound"
+    async with websockets.connect(uri) as websocket:
+        while True:
+            print(json.loads(await websocket.recv()))
+
+asyncio.run(main())
+PY
+```
+
+WebSocket clients receive the same JSON event envelope as webhooks/SSE, plus periodic `system.keepalive` messages when the stream is idle.
+
 ### Notes
 
 - The API normalizes 10-digit US numbers to `+1XXXXXXXXXX`.
 - Outbound send currently supports single-line text only.
 - `GET /v3/chats` and `GET /v3/chats/{chatId}/messages` use simple offset cursors.
 - Message history persists in `./sms-api-data/sms_api.db`.
+- Webhooks, SSE, and WebSocket streams fire for both inbound and outbound stored messages unless filtered with `event_types` / `events`.
 
 ## PJSIP + Python control (dial + play + record)
 

@@ -1,26 +1,31 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 import hmac
+import json
 from pathlib import Path
+import queue
 import re
 import uuid
 from typing import Annotated, Literal
 
-from fastapi import Depends, FastAPI, Header, Query, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi import Depends, FastAPI, Header, Query, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field
 
 from sms_api.ami import AmiClient, AmiError
 from sms_api.config import Settings, load_settings
+from sms_api.events import EventBroker, MessageEvent, WebhookDispatcher
 from sms_api.modem import ModemPoller
 from sms_api.phone_numbers import PHONE_DIGITS_RE, normalize_phone_number as normalize_phone_number_value
 from sms_api.storage import SmsStore
 
 
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
+SUPPORTED_EVENT_TYPES = ("message.inbound", "message.outbound")
 
 
 class ApiError(Exception):
@@ -176,6 +181,30 @@ class InboundSmsResult(BaseModel):
     message_id: str
 
 
+class CreateWebhookSubscriptionRequest(BaseModel):
+    target_url: AnyHttpUrl
+    event_types: list[str] | None = Field(default=None, min_length=1, max_length=16)
+    secret: str | None = Field(default=None, max_length=255)
+
+
+class WebhookSubscription(BaseModel):
+    id: str
+    target_url: str
+    event_types: list[str]
+    is_active: bool
+    created_at: str
+    updated_at: str
+    has_secret: bool
+    last_success_at: str | None = None
+    last_failure_at: str | None = None
+    last_failure_status: int | None = None
+    last_failure_message: str | None = None
+
+
+class ListWebhooksResult(BaseModel):
+    webhooks: list[WebhookSubscription]
+
+
 settings: Settings = load_settings()
 store = SmsStore(settings.db_path)
 ami_client = AmiClient(
@@ -185,6 +214,8 @@ ami_client = AmiClient(
     password=settings.ami_password,
     timeout_seconds=settings.ami_timeout_seconds,
 )
+event_broker = EventBroker()
+webhook_dispatcher = WebhookDispatcher(store=store)
 partner_security = HTTPBearer(auto_error=False)
 modem_poller = ModemPoller(store=store, settings=settings) if settings.modem_port else None
 Path(settings.media_root).mkdir(parents=True, exist_ok=True)
@@ -199,7 +230,9 @@ app = FastAPI(
     openapi_tags=[
         {"name": "Chats", "description": "Create and list SMS chats."},
         {"name": "Messages", "description": "Send and retrieve SMS messages."},
+        {"name": "Events", "description": "Stream live message events over SSE or WebSocket."},
         {"name": "Phone Numbers", "description": "Inspect the modem-backed sending number(s)."},
+        {"name": "Webhooks", "description": "Manage outbound webhook subscriptions for message events."},
         {"name": "Internal", "description": "Inbound hooks used by the dialplan."},
     ],
 )
@@ -217,14 +250,18 @@ async def attach_trace_id(request: Request, call_next):
 
 @app.on_event("startup")
 def startup() -> None:
+    webhook_dispatcher.start()
     if modem_poller is not None and not modem_poller.is_alive():
         modem_poller.start()
 
 
 @app.on_event("shutdown")
 def shutdown() -> None:
+    webhook_dispatcher.stop()
     if modem_poller is not None:
         modem_poller.stop()
+        if modem_poller.is_alive():
+            modem_poller.join(timeout=2.0)
 
 
 @app.exception_handler(ApiError)
@@ -262,14 +299,41 @@ async def ami_error_handler(request: Request, exc: AmiError) -> JSONResponse:
 def require_partner_auth(
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(partner_security)],
 ) -> None:
+    token = None
+    if credentials is not None:
+        if credentials.scheme.lower() != "bearer":
+            raise ApiError(401, "Invalid bearer token.", code=4011)
+        token = credentials.credentials
+    verify_partner_token(token)
+
+
+def verify_partner_token(token: str | None) -> None:
     if not settings.api_bearer_token:
         return
 
-    if credentials is None or credentials.scheme.lower() != "bearer":
+    if token is None:
         raise ApiError(401, "Missing bearer token.", code=4010)
 
-    if not hmac.compare_digest(credentials.credentials, settings.api_bearer_token):
+    if not hmac.compare_digest(token, settings.api_bearer_token):
         raise ApiError(401, "Invalid bearer token.", code=4011)
+
+
+def parse_bearer_token_header(authorization: str | None) -> str | None:
+    if authorization is None:
+        return None
+
+    scheme, separator, value = authorization.partition(" ")
+    if separator == "" or scheme.lower() != "bearer" or not value.strip():
+        raise ApiError(401, "Invalid bearer token.", code=4011)
+    return value.strip()
+
+
+def require_stream_auth(
+    authorization: Annotated[str | None, Header()] = None,
+    access_token: Annotated[str | None, Query()] = None,
+) -> None:
+    token = access_token or parse_bearer_token_header(authorization)
+    verify_partner_token(token)
 
 
 def require_internal_auth(x_internal_token: Annotated[str | None, Header()] = None) -> None:
@@ -299,6 +363,35 @@ def next_cursor(current_offset: int, limit: int, returned_count: int) -> str | N
     if returned_count < limit:
         return None
     return str(current_offset + returned_count)
+
+
+def normalize_event_types(value: str | list[str] | None, *, field_name: str) -> list[str]:
+    if value is None:
+        return list(SUPPORTED_EVENT_TYPES)
+
+    raw_values = value.split(",") if isinstance(value, str) else value
+    normalized: list[str] = []
+    seen: set[str] = set()
+
+    for raw_value in raw_values:
+        event_type = raw_value.strip()
+        if not event_type:
+            continue
+        if event_type not in SUPPORTED_EVENT_TYPES:
+            supported = ", ".join(SUPPORTED_EVENT_TYPES)
+            raise ApiError(
+                400,
+                f"{field_name} includes unsupported value {event_type!r}; supported values are {supported}.",
+                code=40010,
+            )
+        if event_type not in seen:
+            normalized.append(event_type)
+            seen.add(event_type)
+
+    if not normalized:
+        raise ApiError(400, f"{field_name} must include at least one event type.", code=40011)
+
+    return normalized
 
 
 def normalize_phone_number(value: str, *, field_name: str) -> str:
@@ -404,6 +497,47 @@ def build_message(
         delivered_at=message_row["delivered_at"],
         read_at=message_row["read_at"],
     )
+
+
+def build_webhook_subscription(subscription_row: dict) -> WebhookSubscription:
+    return WebhookSubscription(
+        id=subscription_row["id"],
+        target_url=subscription_row["target_url"],
+        event_types=subscription_row["event_types"],
+        is_active=bool(subscription_row["is_active"]),
+        created_at=subscription_row["created_at"],
+        updated_at=subscription_row["updated_at"],
+        has_secret=bool(subscription_row.get("secret")),
+        last_success_at=subscription_row["last_success_at"],
+        last_failure_at=subscription_row["last_failure_at"],
+        last_failure_status=subscription_row["last_failure_status"],
+        last_failure_message=subscription_row["last_failure_message"],
+    )
+
+
+def build_message_event(chat_row: dict, message_row: dict) -> MessageEvent:
+    attachments_by_message_id = store.list_attachments_for_message_ids([message_row["id"]])
+    direction = message_row["direction"]
+    event_type = "message.outbound" if direction == "outbound" else "message.inbound"
+    return MessageEvent(
+        id=str(uuid.uuid4()),
+        type=event_type,
+        occurred_at=message_row["created_at"],
+        payload={
+            "chat": build_chat(chat_row).model_dump(),
+            "message": build_message(chat_row, message_row, attachments_by_message_id).model_dump(),
+        },
+    )
+
+
+def publish_message_event(chat_row: dict, message_row: dict) -> None:
+    event = build_message_event(chat_row, message_row)
+    event_broker.publish(event)
+    webhook_dispatcher.enqueue(event)
+
+
+if modem_poller is not None:
+    modem_poller.on_message_created = publish_message_event
 
 
 def validate_outbound_message(message: MessageContentRequest) -> tuple[str, Literal["SMS"] | None]:
@@ -528,6 +662,14 @@ def send_sms_via_ami(*, device_name: str, to_number: str, body: str) -> None:
         raise AmiError(output or "Unexpected response from Asterisk SMS command")
 
 
+def websocket_close_code_for_error(exc: ApiError) -> int:
+    if exc.status_code == 401:
+        return 4401
+    if exc.status_code == 403:
+        return 4403
+    return 4400
+
+
 @app.get("/healthz")
 def healthz():
     try:
@@ -617,6 +759,49 @@ def get_chat(chat_id: str) -> Chat:
     return build_chat(chat_row)
 
 
+@app.get(
+    "/v3/webhooks",
+    tags=["Webhooks"],
+    response_model=ListWebhooksResult,
+    dependencies=[Depends(require_partner_auth)],
+)
+def list_webhooks() -> ListWebhooksResult:
+    subscriptions = store.list_webhook_subscriptions()
+    return ListWebhooksResult(
+        webhooks=[build_webhook_subscription(subscription) for subscription in subscriptions]
+    )
+
+
+@app.post(
+    "/v3/webhooks",
+    tags=["Webhooks"],
+    response_model=WebhookSubscription,
+    status_code=201,
+    dependencies=[Depends(require_partner_auth)],
+)
+def create_webhook(payload: CreateWebhookSubscriptionRequest) -> WebhookSubscription:
+    created_at = utc_now()
+    subscription_row = store.create_webhook_subscription(
+        target_url=str(payload.target_url),
+        secret=payload.secret,
+        event_types=normalize_event_types(payload.event_types, field_name="event_types"),
+        created_at=created_at,
+    )
+    return build_webhook_subscription(subscription_row)
+
+
+@app.delete(
+    "/v3/webhooks/{webhook_id}",
+    tags=["Webhooks"],
+    status_code=204,
+    dependencies=[Depends(require_partner_auth)],
+)
+def delete_webhook(webhook_id: str) -> Response:
+    if not store.delete_webhook_subscription(webhook_id):
+        raise ApiError(404, f"Webhook {webhook_id} was not found.", code=4041)
+    return Response(status_code=204)
+
+
 @app.post(
     "/v3/chats",
     tags=["Chats"],
@@ -666,6 +851,7 @@ def create_chat(payload: CreateChatRequest, response: Response) -> CreateChatRes
         created_at=timestamp,
     )
     chat_row = store.get_chat(chat_row["id"]) or chat_row
+    publish_message_event(chat_row, message_row)
 
     response.status_code = 201 if created else 200
     return CreateChatResult(
@@ -742,11 +928,83 @@ def send_message_to_chat(
         created_at=timestamp,
     )
     chat_row = store.get_chat(chat_id) or chat_row
+    publish_message_event(chat_row, message_row)
 
     return SendMessageResponse(
         chat_id=chat_id,
         message=build_sent_message(chat_row, message_row),
     )
+
+
+@app.get(
+    "/v3/events/stream",
+    tags=["Events"],
+    dependencies=[Depends(require_stream_auth)],
+)
+async def stream_events(
+    events: Annotated[str | None, Query(description="Comma-separated event types to include.")] = None,
+) -> StreamingResponse:
+    event_types = normalize_event_types(events, field_name="events")
+
+    async def event_generator():
+        subscription_id, subscriber_queue = event_broker.subscribe(event_types=event_types)
+        try:
+            while True:
+                try:
+                    event = await asyncio.to_thread(subscriber_queue.get, True, 15.0)
+                except queue.Empty:
+                    yield f": keepalive {utc_now()}\n\n"
+                    continue
+
+                payload = json.dumps(event.as_dict(), separators=(",", ":"), sort_keys=True)
+                yield f"id: {event.id}\nevent: {event.type}\ndata: {payload}\n\n"
+        except asyncio.CancelledError:
+            raise
+        finally:
+            event_broker.unsubscribe(subscription_id)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.websocket("/v3/events/ws")
+async def websocket_events(websocket: WebSocket) -> None:
+    try:
+        event_types = normalize_event_types(websocket.query_params.get("events"), field_name="events")
+        token = websocket.query_params.get("access_token") or parse_bearer_token_header(
+            websocket.headers.get("authorization")
+        )
+        verify_partner_token(token)
+    except ApiError as exc:
+        await websocket.close(code=websocket_close_code_for_error(exc), reason=exc.message)
+        return
+
+    await websocket.accept()
+    subscription_id, subscriber_queue = event_broker.subscribe(event_types=event_types)
+    try:
+        while True:
+            try:
+                event = await asyncio.to_thread(subscriber_queue.get, True, 15.0)
+                await websocket.send_json(event.as_dict())
+            except queue.Empty:
+                await websocket.send_json(
+                    {
+                        "id": f"keepalive_{uuid.uuid4().hex}",
+                        "type": "system.keepalive",
+                        "occurred_at": utc_now(),
+                    }
+                )
+    except WebSocketDisconnect:
+        pass
+    finally:
+        event_broker.unsubscribe(subscription_id)
 
 
 @app.post(
@@ -770,6 +1028,7 @@ def ingest_inbound_sms(
         body=body,
         created_at=timestamp,
     )
+    publish_message_event(chat_row, message_row)
 
     return InboundSmsResult(chat_id=chat_row["id"], message_id=message_row["id"])
 

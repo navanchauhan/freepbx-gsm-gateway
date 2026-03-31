@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import sqlite3
 import threading
@@ -72,6 +73,20 @@ class SmsStore:
                     created_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS webhook_subscriptions (
+                    id TEXT PRIMARY KEY,
+                    target_url TEXT NOT NULL,
+                    secret TEXT,
+                    event_types TEXT NOT NULL,
+                    is_active INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    last_success_at TEXT,
+                    last_failure_at TEXT,
+                    last_failure_status INTEGER,
+                    last_failure_message TEXT
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_chats_updated_at
                     ON chats(updated_at DESC, id DESC);
 
@@ -84,6 +99,9 @@ class SmsStore:
 
                 CREATE INDEX IF NOT EXISTS idx_attachments_message_id_part_index
                     ON attachments(message_id, part_index ASC, id ASC);
+
+                CREATE INDEX IF NOT EXISTS idx_webhook_subscriptions_active
+                    ON webhook_subscriptions(is_active, updated_at DESC, id DESC);
                 """
             )
             self._ensure_column(connection, "messages", "transport_key", "TEXT")
@@ -398,6 +416,99 @@ class SmsStore:
             row = connection.execute("SELECT * FROM messages WHERE id = ?", (message_id,)).fetchone()
             return dict(row)
 
+    def list_webhook_subscriptions(self, *, active_only: bool = False) -> list[dict]:
+        query = "SELECT * FROM webhook_subscriptions"
+        if active_only:
+            query += " WHERE is_active = 1"
+        query += " ORDER BY created_at ASC, id ASC"
+
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(query).fetchall()
+            return [self._deserialize_webhook_subscription(row) for row in rows]
+
+    def create_webhook_subscription(
+        self,
+        *,
+        target_url: str,
+        secret: str | None,
+        event_types: list[str],
+        created_at: str,
+    ) -> dict:
+        webhook_id = str(uuid.uuid4())
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO webhook_subscriptions (
+                    id,
+                    target_url,
+                    secret,
+                    event_types,
+                    is_active,
+                    created_at,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, 1, ?, ?)
+                """,
+                (
+                    webhook_id,
+                    target_url,
+                    secret,
+                    json.dumps(event_types, separators=(",", ":")),
+                    created_at,
+                    created_at,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM webhook_subscriptions WHERE id = ?",
+                (webhook_id,),
+            ).fetchone()
+            return self._deserialize_webhook_subscription(row)
+
+    def delete_webhook_subscription(self, webhook_id: str) -> bool:
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM webhook_subscriptions WHERE id = ?",
+                (webhook_id,),
+            )
+            return cursor.rowcount > 0
+
+    def record_webhook_delivery_result(
+        self,
+        *,
+        subscription_id: str,
+        success: bool,
+        delivered_at: str,
+        status_code: int | None,
+        message: str | None,
+    ) -> None:
+        with self._lock, self._connect() as connection:
+            if success:
+                connection.execute(
+                    """
+                    UPDATE webhook_subscriptions
+                    SET updated_at = ?,
+                        last_success_at = ?,
+                        last_failure_at = NULL,
+                        last_failure_status = NULL,
+                        last_failure_message = NULL
+                    WHERE id = ?
+                    """,
+                    (delivered_at, delivered_at, subscription_id),
+                )
+                return
+
+            connection.execute(
+                """
+                UPDATE webhook_subscriptions
+                SET updated_at = ?,
+                    last_failure_at = ?,
+                    last_failure_status = ?,
+                    last_failure_message = ?
+                WHERE id = ?
+                """,
+                (delivered_at, delivered_at, status_code, message, subscription_id),
+            )
+
     @staticmethod
     def _insert_attachments(
         connection: sqlite3.Connection,
@@ -434,3 +545,16 @@ class SmsStore:
                     created_at,
                 ),
             )
+
+    @staticmethod
+    def _deserialize_webhook_subscription(row: sqlite3.Row | None) -> dict:
+        if row is None:
+            raise RuntimeError("Webhook subscription row was unexpectedly missing")
+
+        data = dict(row)
+        try:
+            data["event_types"] = json.loads(data["event_types"]) if data["event_types"] else []
+        except json.JSONDecodeError:
+            data["event_types"] = []
+        data["is_active"] = bool(data["is_active"])
+        return data
