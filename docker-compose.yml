@@ -25,6 +25,7 @@ services:
       - ./asterisk/quectel.conf:/etc/asterisk/quectel.conf
       - ./asterisk/extensions_custom.conf:/etc/asterisk/extensions.conf
       - ./asterisk/pjsip_custom.conf:/etc/asterisk/pjsip.conf
+      - ./asterisk/manager_custom.conf:/etc/asterisk/manager.conf
       - ./asterisk/modules.conf:/etc/asterisk/modules.conf
 
       # Recordings and optional custom sounds
@@ -42,3 +43,42 @@ services:
       - /dev/ttyUSB3:/dev/ttyUSB3
       - /dev/ttyUSB4:/dev/ttyUSB4
       - /dev/snd:/dev/snd
+
+  sms-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.sms_api
+    container_name: sim7600-sms-api
+    hostname: sim7600-sms-api
+    restart: unless-stopped
+    depends_on:
+      - asterisk
+
+    environment:
+      - TZ=${TZ:-America/Los_Angeles}
+      - SMS_API_HOST=0.0.0.0
+      - SMS_API_PORT=8080
+      - SMS_API_BEARER_TOKEN=${SMS_API_BEARER_TOKEN:-change-me}
+      - SMS_API_INTERNAL_TOKEN=${SMS_API_INTERNAL_TOKEN:-change-me-internal}
+      - SMS_DB_PATH=/app/data/sms_api.db
+      - AMI_HOST=asterisk
+      - AMI_PORT=${AMI_PORT:-5038}
+      - AMI_USERNAME=${AMI_USERNAME:-admin}
+      - AMI_PASSWORD=${AMI_PASSWORD:-asterisk123}
+      - SMS_DEVICE=${SMS_DEVICE:-quectel0}
+      - SMS_FROM_NUMBER=${SMS_FROM_NUMBER:-}
+      - SMS_MEDIA_ROOT=/app/data/media
+      - MMS_MODEM_PORT=${MMS_MODEM_PORT:-/dev/ttyUSB3}
+      - MMS_POLL_INTERVAL_SECONDS=${MMS_POLL_INTERVAL_SECONDS:-5}
+      - MMS_APN=${MMS_APN:-fast.t-mobile.com}
+      - MMS_HTTP_PDP_CONTEXT_ID=${MMS_HTTP_PDP_CONTEXT_ID:-5}
+      - MMS_HTTP_READ_CHUNK_SIZE=${MMS_HTTP_READ_CHUNK_SIZE:-4096}
+
+    ports:
+      - "${SMS_API_PORT:-8080}:8080/tcp"
+
+    volumes:
+      - ./sms-api-data:/app/data
+
+    devices:
+      - ${MMS_MODEM_PORT:-/dev/ttyUSB3}:${MMS_MODEM_PORT:-/dev/ttyUSB3}

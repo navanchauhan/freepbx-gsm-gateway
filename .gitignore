@@ -22,3 +22,7 @@ recordings/*
 !recordings/.gitkeep
 sounds/*
 !sounds/.gitkeep
+sms-api-data/*
+!sms-api-data/.gitkeep
+pjsip-*.wav
+test_data.wav
